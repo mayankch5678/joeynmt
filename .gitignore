@@ -16,3 +16,8 @@ toy_conv/
 toy_transformer/
 models/
 *.ckpt
+overfit_conv/
+toy_conv/
+toy_transformer/
+models/
+*.ckpt

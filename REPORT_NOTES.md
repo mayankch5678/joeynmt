@@ -269,6 +269,60 @@ completes, 767,424 params (unchanged, init does not alter shapes), training loss
 2946.91, best dev loss 252.42, greedy and beam search both run.
 
 Full suite: 95 tests, `OK (skipped=1)` (was 90).
+
+### Overfit-50 test, `scripts/overfit_test.py` + `configs/conv_overfit.yaml` (2026-09-18)
+First 50 pairs of `test/data/toy/train`, used as both train and dev, conv model
+H=64, 2 layers, k=3, no dropout, Adam lr 1e-3, CPU, capped at 2000 steps.
+PASS: per-token loss 0.0001 (target < 0.1), greedy BLEU 100.00 (target > 95),
+teacher-forced accuracy 1.000. Curve:
+
+| steps | loss/token | bleu | acc |
+|---|---|---|---|
+| 200 | 0.1277 | 81.30 | 0.992 |
+| 400 | 0.0290 | 78.73 | 0.997 |
+| 600 | 0.0267 | 92.50 | 0.998 |
+| 800 | 0.0017 | 100.00 | 1.000 |
+| 1000-2000 | 0.0007 -> 0.0001 | 100.00 | 1.000 |
+
+Converged at step 800. Validation in JoeyNMT always decodes greedily and dev ==
+train here, so that BLEU is the greedy BLEU on the trained pairs.
+
+### Two config traps the overfit test exposed (2026-09-18)
+Both were config/data problems, not model bugs. No model code was changed.
+
+1. `data.{src,trg}.max_length: 100` silently dropped 3 of the 50 pairs from
+   *training* while leaving the dev set at 50. `bpe200.codes` has only 200
+   merges, so it segments very aggressively: the longest of the 50 sentences is
+   44 words but 125 subword tokens. Symptom was `num. of seqs: 47` in the epoch
+   line, teacher-forced accuracy stuck at 0.843, and a *rising* validation loss
+   (the model growing more confident on the 47 it saw and confidently wrong on
+   the 3 it never saw). Fixed with `max_length: 512`.
+   `scripts/overfit_test.py` now parses `num. of seqs` from `train.log` and fails
+   with an explicit message if fewer than N pairs reach the optimizer.
+
+2. The shared `voc_file: test/data/toy/bpe200.txt` (204 entries) cannot represent
+   2.5% of the target subwords of these 50 pairs -- it has no entry for `c`, `x`,
+   `:` or the typographic apostrophe. 25 of the 50 references contain at least one
+   such token. This caps BLEU no matter how good the model is: the run plateaued
+   at exactly 71.10 BLEU from step 800 onward while teacher-forced accuracy was
+   1.000 and per-token loss was 1.5e-4.
+   Fixed by dropping `voc_file` so the vocabulary is built from the 50 pairs.
+   BLEU at step 200 went from 21.27 to 81.30 with no model change.
+   The script now counts `<unk>` in the hypotheses and names this cause when the
+   BLEU assertion fails.
+
+### The 71.10 plateau was NOT a train/inference mismatch (2026-09-18)
+Worth recording because it looked like one, and it is the failure mode the
+overfit test exists to catch. Teacher-forced accuracy 1.000 with greedy BLEU 71
+should be impossible: if argmax is right at every position given the gold prefix,
+greedy from BOS must reproduce the reference by induction.
+Token-level diagnosis on the checkpoint showed greedy output equal to the gold
+token sequence for **all 50 sentences**, the only difference being the trailing
+`</s>` that the tokenizer does not emit for the reference. So the full-prefix
+decoding path (`transformer_greedy` + `ConvDecoder`) is exactly consistent with
+teacher forcing, which is the property SPEC.md §3 relies on. The BLEU gap came
+entirely from `<unk>` in the references, i.e. from the vocabulary.
+
 Planned:
 - padding-invariance test for the encoder
 - gradient-based causality test for the decoder
