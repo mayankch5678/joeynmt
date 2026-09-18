@@ -448,6 +448,16 @@ def build_model(
     # custom initialization of model parameters
     initialize_model(model, cfg, src_pad_index, trg_pad_index)
 
+    # `initialize_model` overwrites every weight, so re-apply the ConvS2S
+    # initialization (SPEC.md §5) on top of it.
+    if isinstance(model.encoder, ConvEncoder):
+        model.encoder.reset_parameters()
+    if isinstance(model.decoder, ConvDecoder):
+        # with tied_softmax the output layer's weight *is* trg_embed.lut.weight,
+        # and the init writes in place: leave it to the embedding initializer.
+        tied = model.decoder.output_layer.weight is trg_embed.lut.weight
+        model.decoder.reset_parameters(init_output_layer=not tied)
+
     # initialize embeddings from file
     enc_embed_path = enc_cfg["embeddings"].get("load_pretrained", None)
     dec_embed_path = dec_cfg["embeddings"].get("load_pretrained", None)

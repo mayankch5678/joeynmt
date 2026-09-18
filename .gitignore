@@ -12,3 +12,7 @@ toy_conv/
 toy_transformer/
 models/
 *.ckpt
+toy_conv/
+toy_transformer/
+models/
+*.ckpt

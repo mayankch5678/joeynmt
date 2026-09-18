@@ -123,7 +123,26 @@ Five lines replaced in two baseline files, nothing else:
   decoder, no incremental state"; kept the name to keep the diff minimal and
   added a comment.
 
-### ConvS2S init is currently NOT applied end to end (2026-09-18)
+### ConvS2S init ordering, FIXED (2026-09-18)
+Superseded the entry below. `build_model` now re-runs `reset_parameters()` on
+both conv modules immediately after `initialize_model`, guarded by `isinstance`.
+The `tied_softmax` case is handled with
+`model.decoder.reset_parameters(init_output_layer=not tied)` where
+`tied = model.decoder.output_layer.weight is trg_embed.lut.weight`: the init
+writes in place, so re-initialising a tied output layer would overwrite the
+target embedding table and un-zero its padding row.
+
+Measured, with H=64, k=3, dropout=0.1 (so n=192, p=0.9, target std 0.13693):
+- before the fix, a GLU conv weight came out at std 0.00937, ~15x too small.
+  That is not xavier_uniform on the conv weight (0.0589) either: `initialize_model`
+  sees the weight-norm parametrization's two tensors, `original1` (v, 3-dim) and
+  `original0` (g, shape (2H,1,1)), and xavier-initialises each separately.
+  fan_in=1 on the g tensor makes the reconstructed `weight = g * v / ||v||`
+  badly scaled. So the generic init is not merely un-paper-like for a
+  weight-normalised conv, it is broken.
+- after the fix, std 0.13693 as intended.
+
+### [superseded] ConvS2S init is currently NOT applied end to end (2026-09-18)
 `ConvEncoder.reset_parameters()` / `ConvDecoder.reset_parameters()` run in
 `__init__`, but `build_model` calls `initialize_model` afterwards
 (`model.py:429`), which overwrites every weight with `xavier_uniform`. So the
@@ -224,6 +243,32 @@ tied tensors and yields the first registered name, and `Model.__init__` register
 the tied weight the *embedding* initializer rather than the generic one.
 
 Full suite after wiring: 90 tests, `OK (skipped=1)`, unchanged.
+
+### ConvS2S init after build_model, `test/unit/test_conv_model_init.py` (2026-09-18), 5 tests
+- `test_conv_dispatch`: `type: conv` really builds `ConvEncoder`/`ConvDecoder`.
+- `test_glu_conv_std_is_convs2s_not_xavier`: every GLU conv weight in a built
+  model has std within 5% of `sqrt(4p/n)`, and at least 30% away from what
+  `xavier_uniform` produces on the same shape. The test first asserts the two
+  hypotheses are >50% apart, so it cannot pass by them being indistinguishable.
+  Conv biases are exactly zero.
+- `test_non_glu_layer_std`: the four projection types match `sqrt(1/n)`.
+- `test_tied_softmax_survives_reset_parameters`: with `tied_softmax: True`,
+  `output_layer.weight is trg_embed.lut.weight`, the pad row is still exactly
+  zero, and the tied weight's std does not look like `sqrt(1/E)`. Teeth: calling
+  `reset_parameters(init_output_layer=True)` by hand afterwards does destroy the
+  pad row, so the guard is what protects it.
+- `test_untied_output_layer_is_initialized`: without tying the output layer does
+  get `sqrt(1/E)`, i.e. the guard is not just disabling the init everywhere.
+
+Mutation check on the fix itself: disabling the two `reset_parameters()` calls in
+`build_model` fails 3 of the 5 tests (GLU conv std 0.00937 vs 0.13693, non-GLU
+projection 0.14470 vs 0.17678, untied output layer off by 48%).
+
+Toy run re-verified after the fix: `python -m joeynmt train configs/conv_small.yaml`
+completes, 767,424 params (unchanged, init does not alter shapes), training loss
+2946.91, best dev loss 252.42, greedy and beam search both run.
+
+Full suite: 95 tests, `OK (skipped=1)` (was 90).
 Planned:
 - padding-invariance test for the encoder
 - gradient-based causality test for the decoder

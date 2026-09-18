@@ -720,10 +720,15 @@ class ConvDecoder(Decoder):
         if freeze:
             freeze_params(self)
 
-    def reset_parameters(self) -> None:
+    def reset_parameters(self, init_output_layer: bool = True) -> None:
         """
         ConvS2S initialisation (SPEC.md §5). Called again from `build_model`
         after `initialize_model`, which would otherwise overwrite everything.
+
+        :param init_output_layer: set to False when `tied_softmax` has made
+            `output_layer.weight` the very same tensor as `trg_embed.lut.weight`.
+            `init_default_layer_` writes in place, so initialising it here would
+            silently overwrite the target embedding table.
         """
         init_embedding_(self.pos_embed)
         if self.input_proj is not None:
@@ -734,7 +739,8 @@ class ConvDecoder(Decoder):
             attention.reset_parameters()
         if self.output_proj is not None:
             init_default_layer_(self.output_proj, fan_in=self.hidden_size)
-        init_default_layer_(self.output_layer, fan_in=self.emb_size)
+        if init_output_layer:
+            init_default_layer_(self.output_layer, fan_in=self.emb_size)
 
     def forward(
         self,
