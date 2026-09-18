@@ -216,6 +216,36 @@ like +2.3% when it is really +20.4%.
 Worth remembering for the report's parameter table: never split JoeyNMT
 parameters by substring.
 
+### Third upstream torch-compatibility fix: ReduceLROnPlateau `verbose` (2026-09-18)
+`joeynmt/builders.py` passed `verbose=False` to `ReduceLROnPlateau`. torch
+deprecated that argument in 2.2 and later removed it, so Colab's torch 2.11
+raises `TypeError` inside `build_scheduler` and training dies before step 1,
+while the local torch 2.1.2 still accepts it. Every config we use sets
+`scheduling: "plateau"`, so this blocked all three Multi30k runs.
+
+Fix, 6 added lines in the `plateau` branch only:
+
+    if "verbose" not in inspect.signature(ReduceLROnPlateau).parameters:
+        kwargs.pop("verbose", None)
+
+Guarded on the signature rather than on a torch version string, so it keeps
+forwarding `verbose` wherever it is still accepted and local behaviour is
+unchanged (verified: `verbose` is in the signature on torch 2.1.2). No other
+scheduler touched. The only visible difference on new torch is that the
+`ReduceLROnPlateau(...)` log line no longer prints `verbose=False`, which is
+correct: it logs what was actually passed.
+
+This is the third fix of the same kind, all caused by running a January 2024
+release (`cdc4d03`, 2024-01-25) in 2026 against 2026 dependency stacks:
+1. `numpy<2` -- torch 2.1.2 is built against the NumPy 1.x ABI.
+2. `sentencepiece==0.1.99` -- 0.2.x drops `SetVocabulary` from the Python API.
+3. this one -- `verbose` removed from `ReduceLROnPlateau`.
+The first two are pins, i.e. we pin the world to the code. This one could not
+be: torch 2.11 is what Colab provides and downgrading it would give up the GPU
+build, so the code had to adapt to the world instead. Worth a sentence in the
+report's reproducibility section: pinning stops working once one end of the
+stack is not under your control.
+
 ## Paper ambiguities and resolutions
 Architecture frozen as equations and tensor shapes in `SPEC.md` (2026-09-17).
 `SPEC.md` §6 lists the five ambiguities and the chosen reading:
@@ -392,6 +422,22 @@ vocabulary otherwise, printing which. Also prints the three-way spread over both
 Re-run it after `scripts/get_multi30k.sh` to confirm against the real vocabulary;
 the `body` column must not move.
 
+### Scheduler compatibility, `test/unit/test_builders_compat.py` (2026-09-18), 4 tests
+The torch 2.11 path cannot be exercised on the local torch 2.1.2, so the test
+substitutes a stand-in `ReduceLROnPlateau` whose `__init__` has no `verbose`
+parameter and asserts `build_scheduler` still succeeds with the right `mode`,
+`factor` and `patience`.
+- Teeth, inside the test: it first asserts the stand-in really does raise
+  `TypeError` when handed `verbose`. Reverting the shim reproduces exactly the
+  Colab failure, `TypeError: __init__() got an unexpected keyword argument
+  'verbose'`, and the test errors. Verified by hand.
+- `test_verbose_still_passed_where_supported` covers the other direction: on a
+  torch that accepts `verbose` the shim must not strip it. The recorder copies
+  the real `__signature__`, otherwise patching the class would itself change
+  what the shim inspects (this caught a false failure while writing the test).
+- `test_other_schedulers_untouched` builds `decaying` and `exponential` and
+  checks class and step-at, since the fix must not reach them.
+
 ## Bugs and fixes
 
 ## Environment and reproducibility
@@ -401,7 +447,24 @@ the `body` column must not move.
   numpy<2 (torch 2.1.2 NumPy 1.x ABI), sentencepiece==0.1.99
   (0.2.x drops SetVocabulary), importlib_metadata (missing from requirements)
 - Baseline test suite: OK (skipped=1)
-- Colab setup: TBD
+### Colab (GPU training environment), 2026-09-18
+- Colab runtime: Python 3.13, torch 2.11.0+cu128. A completely different stack
+  from the local Mac (Python 3.11.16, torch 2.1.2, CPU only). Both environments
+  are documented because the results come from Colab and the correctness tests
+  are run locally.
+- `sentencepiece==0.1.99` is required here too (0.2.2 drops `SetVocabulary`).
+  No cp313 wheel exists, so pip builds it from source; this succeeds and takes
+  under a minute.
+- `importlib_metadata` is NOT needed on Python 3.13, unlike the local env.
+- JoeyNMT's `setup.py` pins `protobuf<3.21`, which downgrades Colab's
+  preinstalled protobuf 5.29.6 and produces dependency-conflict warnings for
+  TensorFlow and google-cloud packages. Those packages are unused here and the
+  warnings are harmless.
+- `torch.cuda.amp.GradScaler` raises a `FutureWarning` on torch 2.11
+  (`training.py:112`). Still functional; noted in case it becomes an error.
+- Test suite on Colab: 95 tests, `OK (skipped=1)` after the sentencepiece pin.
+  (That run predates `test/unit/test_builders_compat.py`; the suite is 99 tests
+  locally as of the scheduler fix below.)
 
 ## Results and observations
 

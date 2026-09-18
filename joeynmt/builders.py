@@ -2,6 +2,7 @@
 """
 Collection of builder functions
 """
+import inspect
 from functools import partial
 from typing import Callable, Dict, Generator, Optional
 
@@ -182,6 +183,11 @@ def build_scheduler(
             "factor": cfg.get("decrease_factor", 0.1),
             "patience": cfg.get("patience", 10),
         }
+        # torch deprecated `verbose` in 2.2 and later removed it: passing it
+        # raises TypeError on Colab's torch 2.11. Drop it only where it is no
+        # longer accepted, so torch 2.1.2 behaviour is unchanged.
+        if "verbose" not in inspect.signature(ReduceLROnPlateau).parameters:
+            kwargs.pop("verbose", None)
         scheduler = ReduceLROnPlateau(optimizer=optimizer, **kwargs)
         # scheduler step is executed after every validation
         scheduler_step_at = "validation"
