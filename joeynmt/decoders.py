@@ -471,6 +471,10 @@ class RecurrentDecoder(Decoder):
 
         # for multiple layers: is the same for all layers
         if self.init_hidden_option == "bridge" and encoder_final is not None:
+            # `search.py:411` calls this outside the autocast context, so under
+            # fp16 `encoder_final` arrives as Half while the bridge weights are
+            # still Float. A no-op in fp32, where the dtypes already match.
+            encoder_final = encoder_final.to(self.bridge_layer.weight.dtype)
             # num_layers x batch_size x hidden_size
             hidden = (
                 self.activation(self.bridge_layer(encoder_final)

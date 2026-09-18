@@ -323,6 +323,40 @@ tokenizer, vocabulary, beam size 5, length penalty 1.0 and sacrebleu
 `tokenize: "13a"`, so the comparison stays controlled: the only difference
 between the three runs is the `model:` block.
 
+### Fourth upstream fix: fp16 beam search with the RNN decoder (2026-09-18)
+`search.py:411` calls `model.decoder._init_hidden(encoder_hidden)` outside the
+`torch.autocast` context. Under fp16 the encoder state arrives as Half while the
+bridge layer's weights are still Float, so beam search dies with
+
+    RuntimeError: mat1 and mat2 must have the same dtype, but got Half and Float
+
+Only `RecurrentDecoder` + fp16 + beam search is affected: the Transformer and
+conv paths never call `_init_hidden`, and of the three `init_hidden` options only
+`"bridge"` does a matmul there (`"last"` slices and repeats, `"zero"` calls
+`new_zeros`), so the other two were never at risk.
+
+Fix, 4 added lines in `RecurrentDecoder._init_hidden`, `"bridge"` branch only:
+
+    encoder_final = encoder_final.to(self.bridge_layer.weight.dtype)
+
+`Tensor.to(dtype)` returns the same object when the dtype already matches, so
+fp32 is unchanged: no copy, no extra autograd node. Asserted in the tests with
+`assertIs`.
+
+Impact on the results table: none, and no retraining. The RNN baseline trained
+to completion; only the final beam decode crashed, so the checkpoint was intact
+and re-decoding it was enough.
+
+Counted as the fourth upstream fix, but it is a different kind from the first
+three and the report should say so:
+1. `numpy<2` -- version drift (torch 2.1.2 built against the NumPy 1.x ABI)
+2. `sentencepiece==0.1.99` -- version drift (0.2.x drops `SetVocabulary`)
+3. `ReduceLROnPlateau` `verbose` -- version drift (removed after torch 2.2)
+4. this one -- a plain latent bug in JoeyNMT v2.3, not caused by any dependency
+   moving. Verified: it reproduces on the pinned local torch 2.1.2, so no
+   version pin would have avoided it. It simply needs fp16 + RNN + beam search
+   together, a combination the upstream test suite does not cover.
+
 ## Paper ambiguities and resolutions
 Architecture frozen as equations and tensor shapes in `SPEC.md` (2026-09-17).
 `SPEC.md` §6 lists the five ambiguities and the chosen reading:
@@ -514,6 +548,22 @@ parameter and asserts `build_scheduler` still succeeds with the right `mode`,
   what the shim inspects (this caught a false failure while writing the test).
 - `test_other_schedulers_untouched` builds `decaying` and `exponential` and
   checks class and step-at, since the fix must not reach them.
+
+### fp16 `_init_hidden`, `test/unit/test_decoder_fp16.py` (2026-09-18), 4 tests
+- `test_bridge_accepts_half_encoder_state`: Half encoder state into a Float
+  bridge layer returns finite values of the weights' dtype and the right shape.
+- `test_fp32_behaviour_unchanged`: asserts `.to(dtype)` returns the *same object*
+  in fp32 (`assertIs`), and that the result equals the hand-computed
+  `activation(bridge_layer(x)).unsqueeze(0).repeat(...)`.
+- `test_half_and_float_agree`: the Half path matches the Float path to
+  rtol/atol 1e-2, i.e. the cast fixes the dtype without changing the answer.
+- `test_other_init_hidden_options_accept_half`: `"last"` and `"zero"` also accept
+  Half, confirming the fix did not need to reach them.
+
+Teeth: removing the one added line makes two of the four error with exactly the
+Colab message, `RuntimeError: mat1 and mat2 must have the same dtype, but got
+Half and Float`. Verified by hand, on the local torch 2.1.2 in fp32-only CPU --
+which is also the evidence that this bug is not version drift.
 
 ## Bugs and fixes
 
