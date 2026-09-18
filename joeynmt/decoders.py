@@ -2,7 +2,7 @@
 """
 Various decoders
 """
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -10,6 +10,13 @@ from torch import Tensor, nn
 from joeynmt.attention import BahdanauAttention, LuongAttention
 from joeynmt.builders import build_activation
 from joeynmt.config import ConfigurationError
+from joeynmt.conv_layers import (
+    RESIDUAL_SCALE,
+    GLUConvBlock,
+    MultiStepAttention,
+    init_default_layer_,
+    init_embedding_,
+)
 from joeynmt.encoders import Encoder
 from joeynmt.helpers import freeze_params, subsequent_mask
 from joeynmt.transformer_layers import PositionalEncoding, TransformerDecoderLayer
@@ -613,4 +620,196 @@ class TransformerDecoder(Decoder):
             f"alpha={self.layers[0].alpha}, "
             f'layer_norm="{self.layers[0]._layer_norm_position}", '
             f"activation={self.layers[0].feed_forward.pwff_layer[1]})"
+        )
+
+
+class ConvDecoder(Decoder):
+    """
+    Convolutional decoder with multi-step attention (Gehring et al., 2017).
+    New class: the RNN and Transformer decoders above are untouched.
+
+    Causality comes from the causal convolutions alone (left-pad `k-1`, trim
+    `k-1`), never from `trg_mask`: `search.py` passes the placeholder
+    `src_mask.new_ones([1, 1, 1])` there (search.py:218, 448). Running over the
+    whole target prefix is therefore correct at inference, which is exactly how
+    `transformer_greedy` and the Transformer branch of `beam_search` call a
+    decoder, so no incremental convolution state is needed.
+
+    `encoder_output` carries the attention keys and values side by side; see
+    `ConvEncoder`.
+    """
+
+    # pylint: disable=unused-argument,too-many-instance-attributes
+    def __init__(
+        self,
+        hidden_size: int = 512,
+        emb_size: int = 512,
+        num_layers: int = 8,
+        kernel_width: int = 3,
+        dropout: float = 0.1,
+        emb_dropout: float = 0.1,
+        vocab_size: int = 1,
+        freeze: bool = False,
+        **kwargs,
+    ) -> None:
+        """
+        Create a convolutional decoder.
+
+        :param hidden_size: conv channel width H
+        :param emb_size: embedding / attention-space width E
+        :param num_layers: number of GLU conv blocks, each with its own attention
+        :param kernel_width: conv kernel width k
+        :param dropout: dropout on every conv input and before the output layer
+        :param emb_dropout: dropout after the positional embeddings
+        :param vocab_size: size of the target vocabulary
+        :param freeze: set to True to keep all decoder parameters fixed
+        :param kwargs: `max_position` (default 1024), `encoder`, and everything
+            else `build_model` splats in
+        """
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.emb_size = emb_size
+        self.kernel_width = kernel_width
+        self.dropout_p = dropout
+        self.max_position = kwargs.get("max_position", 1024)
+        self._output_size = vocab_size
+
+        encoder = kwargs.get("encoder", None)
+        if encoder is not None and hasattr(encoder, "attention_size"):
+            assert encoder.attention_size == emb_size, (
+                f"conv encoder attention size {encoder.attention_size} != conv "
+                f"decoder emb_size {emb_size}"
+            )
+
+        # Embeddings has no positional embeddings, so they live here
+        self.pos_embed = nn.Embedding(self.max_position, emb_size)
+        self.emb_dropout = nn.Dropout(p=emb_dropout)
+
+        # projections only when the widths differ
+        self.input_proj = (
+            nn.Linear(emb_size, hidden_size) if emb_size != hidden_size else None
+        )
+        self.layers = nn.ModuleList([
+            GLUConvBlock(
+                hidden_size=hidden_size,
+                kernel_width=kernel_width,
+                dropout=dropout,
+                padding_mode="causal",
+                residual=False,  # attention sits between the GLU and the residual
+            ) for _ in range(num_layers)
+        ])
+        # multi-step attention: EVERY layer attends
+        self.attentions = nn.ModuleList([
+            MultiStepAttention(hidden_size=hidden_size, emb_size=emb_size)
+            for _ in range(num_layers)
+        ])
+        self.output_proj = (
+            nn.Linear(hidden_size, emb_size) if emb_size != hidden_size else None
+        )
+
+        self.out_dropout = nn.Dropout(p=dropout)
+        # must be called `output_layer` and take emb_size, so `tied_softmax` can
+        # tie it to trg_embed.lut.weight
+        self.output_layer = nn.Linear(emb_size, vocab_size, bias=False)
+
+        # per-layer attention, detached, for the report figures
+        self.layer_attentions: List[Tensor] = []
+
+        self.reset_parameters()
+        if freeze:
+            freeze_params(self)
+
+    def reset_parameters(self) -> None:
+        """
+        ConvS2S initialisation (SPEC.md §5). Called again from `build_model`
+        after `initialize_model`, which would otherwise overwrite everything.
+        """
+        init_embedding_(self.pos_embed)
+        if self.input_proj is not None:
+            init_default_layer_(self.input_proj, fan_in=self.emb_size)
+        for layer in self.layers:
+            layer.reset_parameters()
+        for attention in self.attentions:
+            attention.reset_parameters()
+        if self.output_proj is not None:
+            init_default_layer_(self.output_proj, fan_in=self.hidden_size)
+        init_default_layer_(self.output_layer, fan_in=self.emb_size)
+
+    def forward(
+        self,
+        trg_embed: Tensor,
+        encoder_output: Tensor,
+        encoder_hidden: Tensor = None,
+        src_mask: Tensor = None,
+        unroll_steps: int = None,
+        hidden: Tensor = None,
+        trg_mask: Tensor = None,
+        **kwargs,
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        """
+        Decode the whole target prefix in one pass.
+
+        :param trg_embed: embedded targets, (batch, trg_len, emb_size)
+        :param encoder_output: (batch, src_len, 2 * emb_size), keys ++ values
+        :param encoder_hidden: unused
+        :param src_mask: (batch, 1, src_len) bool, True = real token
+        :param unroll_steps: unused
+        :param hidden: unused
+        :param trg_mask: (batch, 1, trg_len) while training, (1, 1, 1) in search.
+            Only used to zero padded target positions before each convolution;
+            causality does not depend on it.
+        :return:
+            - out: logits, (batch, trg_len, vocab_size)
+            - x: last layer states, (batch, trg_len, hidden_size)
+            - att: last layer attention, (batch, trg_len, src_len)
+            - None: the att_vectors slot
+        """
+        _, trg_len, _ = trg_embed.size()
+        assert src_mask is not None, "conv decoder needs src_mask"
+        assert trg_len <= self.max_position, \
+            f"trg_len {trg_len} exceeds max_position {self.max_position}"
+        assert encoder_output.size(-1) == 2 * self.emb_size, (
+            f"encoder_output width {encoder_output.size(-1)} != 2 * emb_size "
+            f"{2 * self.emb_size}; is the encoder a ConvEncoder?"
+        )
+
+        # (D4) attention keys z_u and values z_c = sqrt(0.5) (z_u + e)
+        keys, values = encoder_output.chunk(2, dim=-1)
+
+        # (D1)-(D2) learned positional embeddings, then embedding dropout
+        pos = torch.arange(trg_len, device=trg_embed.device).unsqueeze(0)
+        emb = self.emb_dropout(trg_embed + self.pos_embed(pos))
+
+        # target pad mask, (batch, trg_len, 1). In search trg_mask is (1, 1, 1),
+        # a placeholder, and there are no pads in the prefix.
+        trg_pad_mask = None
+        if trg_mask is not None and trg_mask.size(-1) == trg_len:
+            trg_pad_mask = trg_mask.transpose(1, 2).to(emb.dtype)
+            emb = emb * trg_pad_mask
+
+        # (D3)
+        x = emb if self.input_proj is None else self.input_proj(emb)
+
+        # (D5)-(D16) conv block, then attention, then the block residual
+        self.layer_attentions = []
+        att = None
+        for layer, attention in zip(self.layers, self.attentions):
+            residual = x
+            x = layer(x, trg_pad_mask)  # bare GLU output, causal
+            x, att = attention(x, emb, keys, values, src_mask)
+            x = RESIDUAL_SCALE * (x + residual)
+            self.layer_attentions.append(att.detach())
+
+        # (D17)-(D19)
+        out = x if self.output_proj is None else self.output_proj(x)
+        out = self.output_layer(self.out_dropout(out))
+
+        return out, x, att, None
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(num_layers={len(self.layers)}, "
+            f"hidden_size={self.hidden_size}, emb_size={self.emb_size}, "
+            f"kernel_width={self.kernel_width})"
         )

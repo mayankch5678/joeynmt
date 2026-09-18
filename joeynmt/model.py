@@ -11,9 +11,9 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from joeynmt.config import ConfigurationError
-from joeynmt.decoders import Decoder, RecurrentDecoder, TransformerDecoder
+from joeynmt.decoders import ConvDecoder, Decoder, RecurrentDecoder, TransformerDecoder
 from joeynmt.embeddings import Embeddings
-from joeynmt.encoders import Encoder, RecurrentEncoder, TransformerEncoder
+from joeynmt.encoders import ConvEncoder, Encoder, RecurrentEncoder, TransformerEncoder
 from joeynmt.helpers_for_ddp import get_logger
 from joeynmt.initialization import initialize_model
 from joeynmt.loss import XentLoss
@@ -378,6 +378,13 @@ def build_model(
             emb_dropout=enc_emb_dropout,
             pad_index=src_pad_index,
         )
+    elif enc_cfg.get("type", "recurrent") == "conv":
+        encoder = ConvEncoder(
+            **enc_cfg,
+            emb_size=src_embed.embedding_dim,
+            emb_dropout=enc_emb_dropout,
+            pad_index=src_pad_index,
+        )
     else:
         encoder = RecurrentEncoder(
             **enc_cfg,
@@ -396,6 +403,14 @@ def build_model(
             emb_size=trg_embed.embedding_dim,
             emb_dropout=dec_emb_dropout,
         )
+    elif dec_cfg.get("type", "transformer") == "conv":
+        decoder = ConvDecoder(
+            **dec_cfg,
+            encoder=encoder,
+            vocab_size=len(trg_vocab),
+            emb_size=trg_embed.embedding_dim,
+            emb_dropout=dec_emb_dropout,
+        )
     else:
         decoder = RecurrentDecoder(
             **dec_cfg,
@@ -404,6 +419,11 @@ def build_model(
             emb_size=trg_embed.embedding_dim,
             emb_dropout=dec_emb_dropout,
         )
+
+    # ConvS2S: scale encoder gradients by 1 / #attention layers. Every conv
+    # decoder layer attends, so that is the decoder's number of layers.
+    if isinstance(encoder, ConvEncoder) and isinstance(decoder, ConvDecoder):
+        encoder.num_attention_layers = len(decoder.layers)
 
     model = Model(
         encoder=encoder,

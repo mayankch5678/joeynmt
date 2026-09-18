@@ -8,3 +8,7 @@ __pycache__
 .pytest_cache
 *.pyc
 jnmt
+toy_conv/
+toy_transformer/
+models/
+*.ckpt

@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from joeynmt.batch import Batch
-from joeynmt.decoders import RecurrentDecoder, TransformerDecoder
+from joeynmt.decoders import ConvDecoder, RecurrentDecoder, TransformerDecoder
 from joeynmt.helpers import adjust_mask_size, tile
 from joeynmt.helpers_for_ddp import ddp_merge
 from joeynmt.model import DataParallelWrapper, Model
@@ -42,7 +42,7 @@ def greedy(
         - stacked_attention_scores: attention scores (3d array)
     """
     # pylint: disable=no-else-return
-    if isinstance(model.decoder, TransformerDecoder):
+    if isinstance(model.decoder, (TransformerDecoder, ConvDecoder)):
         return transformer_greedy(
             src_mask,
             max_output_length,
@@ -395,7 +395,9 @@ def beam_search(
     device = encoder_output.device
     dtype = encoder_output.dtype
     autocast = kwargs.get("autocast", {"device_type": device.type, "enabled": False})
-    is_transformer = isinstance(model.decoder, TransformerDecoder)
+    # True for any full-prefix decoder: no incremental state, feed the whole
+    # `alive_seq` every step. ConvDecoder is causal by construction.
+    is_transformer = isinstance(model.decoder, (TransformerDecoder, ConvDecoder))
 
     att_vectors = None  # for RNN only, not used for Transformer
     hidden = None  # for RNN only, not used for Transformer
