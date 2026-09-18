@@ -1,0 +1,146 @@
+name: "multi30k_rnn"
+model_dir: "models/multi30k_rnn"
+joeynmt_version: "2.3.0"
+use_cuda: True                      # numbers for the results table are GPU only
+fp16: True
+random_seed: 42
+
+# =========================================================================
+# SHARED BLOCK -- byte-identical in multi30k_conv.yaml, multi30k_rnn.yaml and
+# multi30k_transformer.yaml. Data, tokenizer, vocabulary, evaluation and
+# optimisation are held fixed so the only difference between the three runs is
+# the architecture. Verify with:
+#   sed -n '/^data:/,/^model:/p' configs/multi30k_*.yaml | md5
+# =========================================================================
+data:
+    train: "test/data/multi30k/train"           # 29000 pairs
+    dev: "test/data/multi30k/dev"               # 1014 pairs
+    test: "test/data/multi30k/test"             # 1000 pairs
+    dataset_type: "plain"
+    sample_train_subset: -1
+    sample_dev_subset: -1
+    src:
+        lang: "de"
+        max_length: 100             # in BPE tokens
+        min_length: 1
+        lowercase: False            # must match how bpe.10000.codes were learned
+        normalize: False            # (scripts/get_multi30k.sh)
+        level: "bpe"
+        voc_limit: 100000           # no cut: vocab.txt is already the BPE inventory
+        voc_min_freq: 1
+        voc_file: "test/data/multi30k/vocab.txt"
+        tokenizer_type: "subword-nmt"
+        tokenizer_cfg:
+            num_merges: 10000
+            codes: "test/data/multi30k/bpe.10000.codes"
+            dropout: 0.0
+            pretokenizer: "none"    # must match scripts/get_multi30k.sh
+    trg:
+        lang: "en"
+        max_length: 100             # in BPE tokens
+        min_length: 1
+        lowercase: False            # must match how bpe.10000.codes were learned
+        normalize: False            # (scripts/get_multi30k.sh)
+        level: "bpe"
+        voc_limit: 100000           # no cut: vocab.txt is already the BPE inventory
+        voc_min_freq: 1
+        voc_file: "test/data/multi30k/vocab.txt"
+        tokenizer_type: "subword-nmt"
+        tokenizer_cfg:
+            num_merges: 10000
+            codes: "test/data/multi30k/bpe.10000.codes"
+            dropout: 0.0
+            pretokenizer: "none"    # must match scripts/get_multi30k.sh
+    special_symbols:
+        unk_token: "<unk>"
+        pad_token: "<pad>"
+        bos_token: "<s>"
+        eos_token: "</s>"
+        unk_id: 0
+        pad_id: 1
+        bos_id: 2
+        eos_id: 3
+
+testing:
+    n_best: 1
+    beam_size: 5
+    beam_alpha: 1.0
+    batch_size: 1024
+    batch_type: "token"
+    eval_metrics: ["bleu"]
+    max_output_length: 100
+    min_output_length: 1
+    return_prob: "none"
+    return_attention: False
+    generate_unk: False
+    no_repeat_ngram_size: -1
+    repetition_penalty: -1
+    sacrebleu_cfg:
+        whitespace: False
+        tokenize: "13a"
+
+training:
+    optimizer: "adam"
+    adam_betas: [0.9, 0.998]
+    learning_rate: 0.0003
+    learning_rate_min: 1.0e-8
+    scheduling: "plateau"
+    patience: 5
+    decrease_factor: 0.7
+    clip_grad_norm: 1.0
+    weight_decay: 0.0
+    loss: "crossentropy"
+    label_smoothing: 0.1
+    batch_size: 4096
+    batch_type: "token"
+    batch_multiplier: 1
+    normalization: "tokens"
+    epochs: 100
+    updates: 100000
+    validation_freq: 500
+    logging_freq: 100
+    early_stopping_metric: "bleu"
+    shuffle: True
+    overwrite: False
+    print_valid_sents: [0, 1, 2]
+    keep_best_ckpts: 3
+
+# Embedding dim is 256 in all three configs and no weights are tied, so each
+# model carries the same 3 * V * 256 vocabulary-dependent parameters
+# (2 embedding tables + the output layer). The parameter comparison between the
+# three is therefore independent of the final BPE vocabulary size.
+model:
+    initializer: "xavier_uniform"
+    init_gain: 1.0
+    bias_initializer: "zeros"
+    embed_initializer: "xavier_uniform"
+    embed_init_gain: 1.0
+    tied_embeddings: False
+    tied_softmax: False
+    encoder:
+        type: "recurrent"
+        rnn_type: "gru"
+        num_layers: 2
+        bidirectional: True
+        embeddings:
+            embedding_dim: 256
+            scale: False
+            freeze: False
+        hidden_size: 256            # bidirectional -> encoder.output_size is 512
+        dropout: 0.2
+        freeze: False
+    decoder:
+        type: "recurrent"
+        rnn_type: "gru"
+        num_layers: 2
+        attention: "luong"
+        input_feeding: True
+        init_hidden: "bridge"
+        embeddings:
+            embedding_dim: 256
+            scale: False
+            freeze: False
+        hidden_size: 256          # = embedding_dim, so output_layer is V x 256
+        dropout: 0.2
+        hidden_dropout: 0.2
+        freeze: False

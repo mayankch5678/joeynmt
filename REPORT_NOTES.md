@@ -160,6 +160,62 @@ Pre-existing baseline bug, not ours: `initialization.py:136-139` only defines
 (RNN too) with `initializer: xavier_normal` raises `NameError`.
 `configs/conv_small.yaml` uses `xavier_uniform`, so it is unaffected.
 
+### Three-way comparison: matched parameter budgets (2026-09-18)
+`configs/multi30k_{conv,rnn,transformer}.yaml`. Everything from `data:` to
+`model:` is byte-identical in all three (verified: same md5 over that range), so
+data, tokenizer, vocabulary, beam size 5, length penalty 1.0, sacrebleu
+`tokenize: "13a"` and the whole optimisation block are held fixed. Only the
+`model:` block differs.
+
+The comparison is made independent of the final BPE vocabulary size by design:
+all three use `embedding_dim: 256`, tie nothing, and end in an output layer of
+width 256, so each carries exactly `3 * V * 256` vocabulary-dependent parameters
+(2 embedding tables + output layer). Verified by counting at V=10000 and V=6000:
+the `body` column is identical, only `shared` moves. This matters because the
+vocabulary does not exist yet -- `scripts/get_multi30k.sh` has not been run --
+and it means the sizing does not have to be redone afterwards.
+
+To keep that property the RNN decoder's `hidden_size` is pinned to 256:
+`RecurrentDecoder.output_layer` is `Linear(hidden_size, vocab_size)`, so a wider
+decoder would have made its vocabulary-dependent share differ from the other two.
+RNN capacity is tuned through the encoder instead.
+
+Final counts at V=10000 (`python scripts/count_params.py configs/multi30k_*.yaml`):
+
+| config | total | shared (3*V*256) | body | encoder | decoder |
+|---|---|---|---|---|---|
+| conv | 10,965,504 | 7,680,000 | 3,285,504 | 1,642,496 | 1,643,008 |
+| transformer | 10,843,904 | 7,680,000 | 3,163,904 | 1,581,824 | 1,582,080 |
+| rnn | 11,097,600 | 7,680,000 | 3,417,600 | 1,972,224 | 1,445,376 |
+
+Spread: 8.0% over the architecture-specific body, 2.3% over the total. Within
+the 10% budget.
+
+Sizes chosen:
+- conv: hidden 256, 4 encoder / 3 decoder layers, k=3. Unchanged (the anchor).
+- transformer: hidden 256 (forced to equal `embedding_dim`), `ff_size` 512
+  (2x hidden), 8 heads, 3 encoder / 2 decoder layers. The 3/2 split mirrors the
+  conv model's deeper-encoder shape; a symmetric 3/3 at ff 512 is +20.4% and
+  misses the budget.
+- rnn: 2-layer bidirectional GRU encoder, hidden 256 (`encoder.output_size` 512),
+  2-layer GRU decoder hidden 256, Luong attention, input feeding, bridge init.
+
+Alternatives inside the budget, recorded in case the shapes need to change:
+transformer (ff 384, 4 enc, 2 dec) is +0.4% vs conv; rnn (hidden 384, 1 enc,
+2 dec) gives a 5.3% three-way spread instead of 8.0% but a shallower encoder.
+
+### Bug in my own parameter counting, fixed before it mattered (2026-09-18)
+The first sweep split "embedding" from "body" with a substring match on
+`"output_layer" in name`. `MultiHeadedAttention` also owns a submodule called
+`output_layer` (`transformer_layers.py`), so every Transformer attention output
+projection was being counted as vocabulary-dependent. That understated the
+Transformer body by 592,128 parameters and made a 3+3 / ff=512 Transformer look
+like +2.3% when it is really +20.4%.
+`scripts/count_params.py` now matches the three exact parameter names
+(`src_embed.lut.weight`, `trg_embed.lut.weight`, `decoder.output_layer.weight`).
+Worth remembering for the report's parameter table: never split JoeyNMT
+parameters by substring.
+
 ## Paper ambiguities and resolutions
 Architecture frozen as equations and tensor shapes in `SPEC.md` (2026-09-17).
 `SPEC.md` §6 lists the five ambiguities and the chosen reading:
@@ -327,6 +383,14 @@ Planned:
 - padding-invariance test for the encoder
 - gradient-based causality test for the decoder
 - overfit-50-sentences test for the full model
+
+### Parameter counts, `scripts/count_params.py` (2026-09-18)
+Builds each config through `build_model` and reports totals without loading data
+or running a step. Uses the real `voc_file` when it exists and a synthetic
+vocabulary otherwise, printing which. Also prints the three-way spread over both
+`total` and `body`, which is the number the 10% budget applies to.
+Re-run it after `scripts/get_multi30k.sh` to confirm against the real vocabulary;
+the `body` column must not move.
 
 ## Bugs and fixes
 
