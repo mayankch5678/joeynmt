@@ -246,6 +246,83 @@ build, so the code had to adapt to the world instead. Worth a sentence in the
 report's reproducibility section: pinning stops working once one end of the
 stack is not under your control.
 
+### Training schedule sized for a 29k-sentence corpus (2026-09-18)
+The three Multi30k configs inherited `epochs: 100`, `updates: 100000`,
+`validation_freq: 500` from a WMT-scale template. After the first conv run the
+settled values are `epochs: 100` (unchanged), `updates: 30000`,
+`validation_freq: 500` (unchanged) and `patience: 5` (unchanged) -- identical in
+all three configs, shared block byte-identical, md5 `4590b1c5...` over `data:`
+to `model:`. Only `updates` ended up changing, from a decorative 100000 to a
+real but non-binding 30000.
+
+Measured, not estimated. Multi30k train is 29,000 pairs; with the real
+`bpe.10000.codes` the BPE lengths are mean 13.7 (de) / 13.3 (en), median 13 both
+sides, p95 23/22, max 50/45.
+
+The detail that decides the arithmetic is that JoeyNMT's token batching counts
+**padded** tokens. `TokenBatchSampler.__iter__` (`joeynmt/datasets.py`) uses
+`n_tokens = max(src_len + 1, trg_len + 1)` and closes a batch when
+`max_tokens_so_far * len(batch) >= batch_size`, so the longest sentence in a
+batch sets the cost for every sentence in it. There is no bucketing. Simulating
+that sampler over the real length distribution (5 shuffles, seed 42):
+
+| quantity | value |
+|---|---|
+| sentences per batch at `batch_size: 4096` | ~121 |
+| updates per epoch | ~240 |
+| naive `sum(max(src,trg)+1) / 4096` estimate | ~109 |
+
+The naive estimate is 2.2x too low; the gap is padding waste (~45% utilisation).
+At the measured ~240 updates/epoch:
+
+| setting | before | after | rationale |
+|---|---|---|---|
+| `epochs` | 100 = ~24,000 updates | **100**, unchanged | measured at convergence, see below |
+| `updates` | 100000 = ~415 epochs | **30000** = ~125 epochs | a real ceiling that still clears the ~24,000 steps 100 epochs takes |
+| `validation_freq` | 500 = every 2.08 epochs | **500**, unchanged | already the intended cadence |
+| `patience` | 5 = ~10.4 epochs | **5**, unchanged | already the intended tolerance |
+
+`epochs` binds before `updates`, so `updates: 30000` never stops a run; it
+replaces an arbitrary large number with a stated ceiling.
+
+### 100 epochs is the right cap: evidence from the first conv run (2026-09-18)
+`multi30k_conv.yaml` at commit `d0c7a68`, Colab T4, fp16: 100 epochs / 24,062
+steps in 32.4 minutes, dev 32.87 / test 34.16 BLEU with beam 5 (EXPERIMENTS.md).
+- Training accuracy was still rising at epoch 100 while dev BLEU had flattened
+  near 29.85 greedy, i.e. the model is at convergence on this corpus and further
+  epochs would buy overfitting, not quality.
+- Early stopping never fired and `ReduceLROnPlateau` never annealed the lr from
+  3e-4, so neither `patience` nor `learning_rate_min` shaped this run. The epoch
+  cap is the only thing that ended it.
+- An intermediate setting of `epochs: 50` / `updates: 20000` was considered and
+  dropped: 20,000 updates is ~83 epochs, so it would have truncated training
+  before the cap. Hence `updates: 30000`.
+- The run also confirms the padded-token measurement below: 24,062 steps over
+  100 epochs is 240.6 updates/epoch against a simulated ~240. The naive
+  unpadded estimate of ~109 would have predicted ~10,900 steps, less than half
+  the truth.
+- 32.4 minutes per run means the three-way comparison costs about 1.6 GPU-hours
+  in total, so there is no budget reason to shorten training.
+
+On `validation_freq`, an intermediate pass lowered it to 200 on the assumption
+of ~110 updates/epoch. Measuring the sampler showed that was the unpadded figure
+and the real rate is ~240, at which 500 already gives validation every 2.08
+epochs and `patience: 5` gives ~10.4 epochs without improvement -- exactly the
+intended behaviour. 200 would have validated every 0.83 epochs, needlessly
+often, and would have made `ReduceLROnPlateau` anneal the lr roughly 2.5x more
+aggressively than intended (~4.2 epochs of tolerance). It was reverted to 500.
+Recorded because the padded-vs-unpadded distinction is easy to get wrong and
+changes every schedule number by a factor of 2.2.
+
+`patience` only controls how fast `ReduceLROnPlateau` anneals the lr, not when
+training stops: `training.py:735` ends a run at `learning_rate_min` (here 1e-8),
+which from 3e-4 with `decrease_factor: 0.7` needs ~29 reductions.
+
+All three models share every one of these settings, along with the data,
+tokenizer, vocabulary, beam size 5, length penalty 1.0 and sacrebleu
+`tokenize: "13a"`, so the comparison stays controlled: the only difference
+between the three runs is the `model:` block.
+
 ## Paper ambiguities and resolutions
 Architecture frozen as equations and tensor shapes in `SPEC.md` (2026-09-17).
 `SPEC.md` §6 lists the five ambiguities and the chosen reading:

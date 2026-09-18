@@ -85,7 +85,9 @@ training:
     learning_rate: 0.0003
     learning_rate_min: 1.0e-8
     scheduling: "plateau"
-    patience: 5
+    patience: 5                     # 5 validations without improvement -> lr * 0.7;
+                                    # ~10 epochs at validation_freq 500. Only anneals the
+                                    # lr, training ends at learning_rate_min (training.py:735)
     decrease_factor: 0.7
     clip_grad_norm: 1.0
     weight_decay: 0.0
@@ -95,9 +97,13 @@ training:
     batch_type: "token"
     batch_multiplier: 1
     normalization: "tokens"
-    epochs: 100
-    updates: 100000
-    validation_freq: 500
+    # Multi30k is 29000 pairs, mean 13.7/13.3 BPE tokens (de/en). JoeyNMT counts
+    # PADDED tokens, max(src,trg)+1 * batch_len (datasets.py TokenBatchSampler),
+    # so batch_size 4096 gives ~121 sentences and ~240 updates per epoch.
+    epochs: 100                     # ~24,000 updates; the conv run measured 24,062
+    updates: 30000                  # non-binding ceiling above the ~24,000 that
+                                    # 100 epochs actually takes
+    validation_freq: 500            # ~2.1 epochs
     logging_freq: 100
     early_stopping_metric: "bleu"
     shuffle: True

@@ -86,3 +86,8 @@ never at the end. Sections:
 
 After any non-trivial change, add the relevant lines to REPORT_NOTES.md
 without being asked.
+
+After any environment fix, upstream incompatibility, version pin, or
+non-obvious design decision, append it to REPORT_NOTES.md in the same
+turn, without being asked. Include the actual error message, version
+numbers, and measured values where relevant.
