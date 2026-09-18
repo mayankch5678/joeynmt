@@ -595,6 +595,50 @@ which is also the evidence that this bug is not version drift.
 
 ## Results and observations
 
+### Final results, Multi30k de-en, test set, beam 5 (2026-09-18)
+
+| model | params | test BLEU | dev BLEU | throughput | wall-clock |
+|---|---|---|---|---|---|
+| ConvS2S (4 enc / 3 dec, k=3) | 10,983,936 | **34.16** | 32.87 | ~30k tok/s | 32.4 min |
+| Transformer (3 enc / 2 dec) | 10,862,336 | **35.06** | 34.28 | ~26k tok/s | 33.9 min |
+| biGRU + Luong (2 enc / 2 dec) | 11,116,032 | **16.66** | 16.02 | ~10.2k tok/s | 72.7 min |
+
+Parameter counts within 2.3% of each other, and data, tokenizer, vocabulary,
+beam size 5, length penalty 1.0, sacrebleu `tokenize: "13a"` and the training
+schedule are identical across the three (EXPERIMENTS.md, and the shared config
+block md5 check).
+
+Observations:
+- The conv model is 0.90 BLEU below the Transformer at matched parameters, the
+  direction and rough magnitude reported in the literature.
+- Throughput on the same T4: conv ~30k tok/s, transformer ~26k, RNN ~10.2k. The
+  conv model is ~3x the RNN and slightly ahead of the Transformer, which is the
+  parallelism argument in Gehring et al. section 1 -- convolutions over the
+  whole sequence instead of a sequential recurrence. Note this is *training*
+  throughput; we gave up ConvS2S's inference-speed advantage by decoding the
+  full prefix each step (see the design decision on incremental state).
+
+LIMITATION -- must appear in the report, not buried:
+- All three ran a fixed 100-epoch budget. Final training accuracy was 0.581
+  (conv), 0.630 (transformer), 0.449 (RNN), all still rising. None had fully
+  converged, and the RNN least of all, so its 16.66 understates what the
+  architecture can do.
+- An equal-epoch budget systematically disadvantages the slowest-converging
+  architecture. The RNN also had the lowest throughput, so equal epochs cost it
+  2.2x the wall-clock of the other two and still left it furthest from
+  convergence. An equal-wall-clock or train-to-convergence protocol would be the
+  fairer comparison; equal-epoch was chosen for simplicity and should be named
+  as a threat to validity rather than defended.
+- Single seed per model, so there is no variance estimate. Differences under
+  ~1 BLEU should not be treated as significant.
+- Those last two points interact and the report must not dodge it: the
+  conv-to-transformer gap is 0.90 BLEU, which is *below* our own significance
+  threshold. The honest claim is that ConvS2S and the Transformer are
+  indistinguishable at this scale and budget, not that the Transformer wins.
+  The RNN's ~18 BLEU deficit is far outside that band and is a real effect, but
+  is confounded by the convergence limitation above.
+
+
 ## Limitations and open questions
 
 ## References
