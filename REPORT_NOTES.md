@@ -381,6 +381,26 @@ names and state_dict keys as before (existing checkpoints and tests untouched).
   capacity as well as attention depth, and the report must say so. A
   parameter-matched variant (e.g. wider or deeper decoder) is not built.
 
+### Report figures, `scripts/make_figures.py` (2026-09-26)
+Writes four vector PDFs into `IMG/` (validation BLEU curves, per-layer conv
+attention, BLEU by source length, architecture schematic). Written but **not yet
+run**; `models/` is gitignored, so it runs on Colab. Choices to remember:
+- `train.log` "Evaluation result (greedy)" lines carry no step. Steps come from
+  `validations.txt` when it agrees with the log value by value, else from the
+  last `Step:` progress line (exact here: `validation_freq` 500 is a multiple of
+  `logging_freq` 100).
+- BLEU by length reads `best.hyps.test`, re-segments `test.de` with the
+  training BPE codes and vocabulary to get source length in BPE tokens, and
+  plots mean sentence-level BLEU (sacrebleu, 13a, `effective_order`), which is
+  noisy and not comparable to corpus BLEU; corpus BLEU per bucket and over the
+  whole set (to compare with EXPERIMENTS.md) are printed alongside.
+- The attention figure greedy-decodes one dev sentence, then teacher-forces the
+  hypothesis and reads `ConvDecoder.layer_attentions`; valid because the decoder
+  is causal, so row t is the attention used to produce token t. Greedy, not
+  beam: JoeyNMT does not return attention under beam search.
+- The schematic omits the E->H / H->E projections because the configs use
+  E = H = 256, where they do not exist.
+
 ## Paper ambiguities and resolutions
 Architecture frozen as equations and tensor shapes in `SPEC.md` (2026-09-17).
 `SPEC.md` §6 lists the five ambiguities and the chosen reading:
