@@ -15,8 +15,8 @@ length penalty 1.0, sacrebleu `tokenize: "13a"` and training schedule; only the
 | 2026-09-18 | 550e2ca train / b5f54a9 decode | multi30k_rnn.yaml | biGRU 2enc/2dec + Luong | 11,116,032 | 24,062 steps / 100 epochs | 14.49 greedy (step 24000); beam 5: dev 16.02, test 16.66 | 72.7 min (+ separate re-decode) | ~10.2k tok/s | Colab T4, fp16 | beam decode crashed on the fp16 `_init_hidden` bug; re-decoded from the checkpoint after the fix. Clearly undertrained at this budget |
 
 Notes on this table:
-- `throughput` is an extra column beyond the schema in CLAUDE.md, added once
-  tokens/sec became one of the comparison's findings.
+- `throughput` was added once tokens/sec became one of the comparison's
+  findings; CLAUDE.md's column list was updated to match.
 - Commit hashes for the transformer and RNN rows were not recorded with the
   runs and are inferred: `550e2ca` is the commit that fixed the training
   schedule, and the RNN's beam decode necessarily post-dates the fp16 fix in

@@ -71,7 +71,7 @@ Anything that checks correctness runs locally.
 ## Logging -- two files, both mandatory
 EXPERIMENTS.md -- one row per training run:
 date | git commit | config | model | params | steps | best dev BLEU |
-wall-clock | hardware | notes
+wall-clock | throughput | hardware | notes
 
 REPORT_NOTES.md -- anything the final report will need. Append as we go,
 never at the end. Sections:

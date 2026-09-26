@@ -357,6 +357,30 @@ three and the report should say so:
    version pin would have avoided it. It simply needs fp16 + RNN + beam search
    together, a combination the upstream test suite does not cover.
 
+### Ablation switch: `attention_layers: "all" | "last"` (2026-09-26)
+`ConvDecoder(attention_layers=...)`, default `"all"` (paper, unchanged). With
+`"last"` the decoder builds one `MultiStepAttention` instead of `L_d`, aligned
+with the final block; blocks before it run bare GLU then the plain
+`sqrt(0.5)(glu + residual)` with no attention and no (D15) step. Anything else
+raises `ValueError`. Implementation detail: `attentions` holds one module per
+*attending* layer and the forward loop maps block `i` to
+`attentions[i - (L_d - len(attentions))]`, so `"all"` keeps the same parameter
+names and state_dict keys as before (existing checkpoints and tests untouched).
+- `build_model` now sets `encoder.num_attention_layers = len(decoder.attentions)`
+  (was `len(decoder.layers)`): `L_d` for `"all"`, 1 for `"last"`, so the encoder
+  gradient scale (E15) follows the number of attention layers actually present.
+- `configs/multi30k_conv_lastattn.yaml` differs from `multi30k_conv.yaml` in
+  `name`, `model_dir` and `decoder.attention_layers: "last"` only (diff checked).
+- Cost of the ablation in parameters, V=10,024 (`count_params.py`): each
+  attention module is 131,584 parameters (two 256x256 linears + biases), 2
+  dropped, so the decoder falls 1,643,008 -> 1,379,840 and the total
+  10,983,936 -> **10,720,768** (-263,168, -2.4%; -8.0% on the body). Against the
+  other models it is 1.3% below the Transformer (10,862,336) and 3.6% below the
+  RNN (11,116,032). The three-way body spread of 8.0% becomes **13.1%** if this
+  variant is included, i.e. outside the 10% budget: the ablation changes
+  capacity as well as attention depth, and the report must say so. A
+  parameter-matched variant (e.g. wider or deeper decoder) is not built.
+
 ## Paper ambiguities and resolutions
 Architecture frozen as equations and tensor shapes in `SPEC.md` (2026-09-17).
 `SPEC.md` §6 lists the five ambiguities and the chosen reading:
@@ -564,6 +588,23 @@ Teeth: removing the one added line makes two of the four error with exactly the
 Colab message, `RuntimeError: mat1 and mat2 must have the same dtype, but got
 Half and Float`. Verified by hand, on the local torch 2.1.2 in fp32-only CPU --
 which is also the evidence that this bug is not version drift.
+
+### Attention-layers ablation, `test/unit/test_conv_attention_layers.py` (2026-09-26), 8 tests
+New file; no existing test modified.
+- `test_layer_attentions_length`: for `L_d` in {1,3,6}, `"last"` gives
+  `len(layer_attentions) == len(attentions) == 1` with `len(layers) == L_d`, the
+  map is (B,T,S) and equals the returned `att`; `"all"` gives `L_d`; default is `"all"`.
+- `test_last_does_not_accumulate`, `test_invalid_value_raises`.
+- `test_parameter_count_shrinks_by_the_dropped_attentions`: exact
+  `(L_d - 1) * params(one attention)`.
+- `test_last_is_still_causal`: the gradient-based causality check on `"last"`
+  (zero at j > i, positive at j = i), since the switch rewires the residual path.
+- `test_last_layer_attention_reaches_the_encoder`: nonzero gradient into
+  `encoder_output`, i.e. the encoder still trains.
+- `build_model`: `num_attention_layers` is `L_d` for `"all"`/default and 1 for
+  `"last"`; the encoder gradient equals the unscaled one times `1/L_d` / `1`.
+Teeth: forcing the constructor to always build `L_d` attentions fails 6 of the 8.
+Full suite: 111 tests, `OK (skipped=1)` (was 103).
 
 ## Bugs and fixes
 

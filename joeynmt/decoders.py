@@ -654,6 +654,7 @@ class ConvDecoder(Decoder):
         emb_dropout: float = 0.1,
         vocab_size: int = 1,
         freeze: bool = False,
+        attention_layers: str = "all",
         **kwargs,
     ) -> None:
         """
@@ -661,17 +662,25 @@ class ConvDecoder(Decoder):
 
         :param hidden_size: conv channel width H
         :param emb_size: embedding / attention-space width E
-        :param num_layers: number of GLU conv blocks, each with its own attention
+        :param num_layers: number of GLU conv blocks
         :param kernel_width: conv kernel width k
         :param dropout: dropout on every conv input and before the output layer
         :param emb_dropout: dropout after the positional embeddings
         :param vocab_size: size of the target vocabulary
         :param freeze: set to True to keep all decoder parameters fixed
+        :param attention_layers: "all" gives every layer its own attention
+            (multi-step attention, as in the paper); "last" attends only in the
+            final layer, the earlier blocks use the plain residual. Ablation.
         :param kwargs: `max_position` (default 1024), `encoder`, and everything
             else `build_model` splats in
         """
         super().__init__()
 
+        if attention_layers not in ("all", "last"):
+            raise ValueError(
+                f'attention_layers must be "all" or "last", got {attention_layers!r}'
+            )
+        self.attention_layers = attention_layers
         self.hidden_size = hidden_size
         self.emb_size = emb_size
         self.kernel_width = kernel_width
@@ -703,10 +712,13 @@ class ConvDecoder(Decoder):
                 residual=False,  # attention sits between the GLU and the residual
             ) for _ in range(num_layers)
         ])
-        # multi-step attention: EVERY layer attends
+        # multi-step attention: EVERY layer attends ("all"); the ablation "last"
+        # keeps only the final layer's. `attentions` holds one module per
+        # attending layer and is aligned with the *last* len(attentions) blocks.
+        num_attentions = num_layers if attention_layers == "all" else 1
         self.attentions = nn.ModuleList([
             MultiStepAttention(hidden_size=hidden_size, emb_size=emb_size)
-            for _ in range(num_layers)
+            for _ in range(num_attentions)
         ])
         self.output_proj = (
             nn.Linear(hidden_size, emb_size) if emb_size != hidden_size else None
@@ -804,12 +816,16 @@ class ConvDecoder(Decoder):
         # (D5)-(D16) conv block, then attention, then the block residual
         self.layer_attentions = []
         att = None
-        for layer, attention in zip(self.layers, self.attentions):
+        first_attending = len(self.layers) - len(self.attentions)
+        for i, layer in enumerate(self.layers):
             residual = x
             x = layer(x, trg_pad_mask)  # bare GLU output, causal
-            x, att = attention(x, emb, keys, values, src_mask)
+            if i >= first_attending:
+                x, att = self.attentions[i - first_attending](
+                    x, emb, keys, values, src_mask
+                )
+                self.layer_attentions.append(att.detach())
             x = RESIDUAL_SCALE * (x + residual)
-            self.layer_attentions.append(att.detach())
 
         # (D17)-(D19)
         out = x if self.output_proj is None else self.output_proj(x)
@@ -821,5 +837,6 @@ class ConvDecoder(Decoder):
         return (
             f"{self.__class__.__name__}(num_layers={len(self.layers)}, "
             f"hidden_size={self.hidden_size}, emb_size={self.emb_size}, "
-            f"kernel_width={self.kernel_width})"
+            f"kernel_width={self.kernel_width}, "
+            f'attention_layers="{self.attention_layers}")'
         )

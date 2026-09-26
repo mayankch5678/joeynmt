@@ -420,10 +420,10 @@ def build_model(
             emb_dropout=dec_emb_dropout,
         )
 
-    # ConvS2S: scale encoder gradients by 1 / #attention layers. Every conv
-    # decoder layer attends, so that is the decoder's number of layers.
+    # ConvS2S: scale encoder gradients by 1 / #attention layers: the decoder's
+    # number of layers when every layer attends, 1 for attention_layers="last".
     if isinstance(encoder, ConvEncoder) and isinstance(decoder, ConvDecoder):
-        encoder.num_attention_layers = len(decoder.layers)
+        encoder.num_attention_layers = len(decoder.attentions)
 
     model = Model(
         encoder=encoder,
